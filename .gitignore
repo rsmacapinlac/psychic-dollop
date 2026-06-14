@@ -1,0 +1,16 @@
+# Secrets — never commit real credentials
+secrets.h
+
+# Arduino / arduino-cli build artifacts
+build/
+*.bin
+*.elf
+*.map
+*.hex
+
+# macOS
+.DS_Store
+
+# Editor / IDE
+.vscode/
+*.swp
