@@ -1,0 +1,12 @@
+profiles:
+  esp32s3:
+    notes: scribr target — ESP32-S3-PICO-1, 8MB OPI PSRAM, Huge APP partition, 8MB flash, USB CDC on boot for serial logs
+    fqbn: esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=huge_app,FlashSize=8M,CDCOnBoot=cdc
+    platforms:
+      - platform: esp32:esp32 (3.3.10)
+    libraries:
+      - Adafruit GFX Library (1.12.6)
+      - Adafruit BusIO (1.17.4)
+      - OneButton (2.6.2)
+
+default_profile: esp32s3
