@@ -36,10 +36,20 @@ void board_power_bsp_t::POWEER_Audio_OFF() {
     gpio_set_level((gpio_num_t)audio_power_pin,1);
 }
 
+void board_power_bsp_t::holdVbatLatch() {
+    // VBAT is a power-hold latch, not an active-low peripheral rail.
+    // HIGH keeps the board powered; LOW releases the latch for intentional shutdown.
+    gpio_set_level((gpio_num_t)vbat_power_pin, 1);
+}
+
+void board_power_bsp_t::releaseVbatLatch() {
+    gpio_set_level((gpio_num_t)vbat_power_pin, 0);
+}
+
 void board_power_bsp_t::VBAT_POWER_ON() {
-    gpio_set_level((gpio_num_t)vbat_power_pin,1);
+    holdVbatLatch();
 }
 
 void board_power_bsp_t::VBAT_POWER_OFF() {
-    gpio_set_level((gpio_num_t)vbat_power_pin,0);
+    releaseVbatLatch();
 }

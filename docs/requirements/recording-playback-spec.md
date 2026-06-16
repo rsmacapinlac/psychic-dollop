@@ -6,19 +6,10 @@ when real audio is wired into scribr.
 
 ## Hardware constraint — mono only
 
-The board — a **Waveshare ESP32-S3 1.54" e-Paper** (codec board id
-`S3_ePaper_1_54`) — uses a **single ES8311 codec for both input and output**:
-
-```
-in_out: {codec: ES8311, pa: 46, use_mclk: 1, pa_gain:6}
-```
-
-The ES8311 is a **mono** codec: one ADC (one microphone), one DAC. There is no
-second microphone and no stereo capture. The I²S link is opened as 2-channel,
-but both slots carry the same single mic signal, so capture is effectively mono.
-
-True multi-mic capture would require different hardware (e.g. the ES7210
-4-channel mic-array ADC, present in the codebase only for a different board).
+Capture is **mono** — the board has a single ES8311 codec (one mic, one
+speaker), so there is no stereo capture. Don't design for stereo on this board.
+The codec hardware details (config, I²S, the multi-mic caveat) are in the board
+reference: `../reference/audio-codec-es8311.md`.
 
 ## Audio format
 
@@ -54,13 +45,10 @@ True multi-mic capture would require different hardware (e.g. the ES7210
 - **Stop control:** polled mid-stream; a button press ends playback early.
 - **Guard:** files of ≤ 44 bytes (header only, no audio) are rejected.
 
-## Decisions to revisit for scribr
+> Open technical decisions from this spec are centralized in
+> `open-technical-decisions.md`: the down-mix method (**TD-2**) and the
+> 16 kHz / 16-bit quality ceiling (**TD-3**). Mono is a hardware limit, not a
+> choice (see "Hardware constraint — mono only" above).
 
-- **Mono is a hardware limit**, not a choice — don't design for stereo capture on
-  this board.
-- **Left-channel-only down-mix** vs. averaging L+R (moot while mono, but relevant
-  if multi-mic hardware is ever used).
-- **Fixed 16 kHz / 16-bit** — adequate for voice/speech-to-text; raise only if a
-  use case needs it (cost: storage + bandwidth).
-
-See also `docs/device-rendering-constraints.md` and the broader NFR notes.
+See also `docs/reference/device-rendering-constraints.md` and
+`docs/requirements/non-functional.md`.

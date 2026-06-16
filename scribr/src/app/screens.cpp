@@ -111,8 +111,12 @@ void idle(GFXcanvas1& c, const Model& m) {
   header(c, "scribr", true, nullptr, false);
 
   char nrec[8]; snprintf(nrec, sizeof nrec, "%d", m.recCount);
-  char bat[8];  snprintf(bat, sizeof bat, "%d%%", m.battery);
-  char sd[16];  snprintf(sd, sizeof sd, "%.1f GB free", m.sdFreeGB);
+  char bat[16];
+  if (m.battery >= 0) snprintf(bat, sizeof bat, "%d%% %.2fV", m.battery, m.batteryV);
+  else strncpy(bat, "--", sizeof bat);
+  char sd[16];
+  if (m.sdPresent) snprintf(sd, sizeof sd, "%.1f GB free", m.sdFreeGB);
+  else strncpy(sd, "NO SD", sizeof sd);
   const char* labels[3] = {"BAT", "SD", "REC"};
   const char* values[3] = {bat, sd, nrec};
 
@@ -138,7 +142,7 @@ void list(GFXcanvas1& c, const Model& m) {
   if (m.recCount == 0) {
     header(c, "RECORDINGS", false, "0 / 0", false);
     textCenter(c, 110, "No recordings yet", F_REG);
-    footer(c, {"exit", "(hold)"}, {"-", nullptr});
+    footer(c, {"exit", "(hold)"}, {"OK", nullptr});
     return;
   }
 
@@ -208,11 +212,51 @@ void deleteConfirm(GFXcanvas1& c, const Model& m) {
   textLeft(c, L, 92, "DURATION", F_REG);
   textRight(c, R, 92, hms, F_BOLD);
 
-  char mb[16]; snprintf(mb, sizeof mb, "%.1f MB", r.dur * 32.0 / 1024.0);
+  char mb[16]; snprintf(mb, sizeof mb, "%.1f MB", r.bytes / (1024.0 * 1024.0));
   textLeft(c, L, 114, "SIZE", F_REG);
   textRight(c, R, 114, mb, F_BOLD);
 
-  footer(c, {"cancel", nullptr}, {"confirm", nullptr});
+  footer(c, {"cancel", nullptr}, {"OK", nullptr});
+}
+
+void conditionScreen(GFXcanvas1& c, const Model& m) {
+  switch (m.condition) {
+    case app::Condition::LowBattery:
+      header(c, "LOW BATTERY", false, nullptr, false);
+      textCenter(c, 92, "Battery low", F_TITLE);
+      textCenter(c, 122, "Recording continues", F_REG);
+      footer(c, {"-", nullptr}, {"dismiss", nullptr});
+      break;
+    case app::Condition::Charging:
+      header(c, "CHARGING", false, nullptr, false);
+      c.fillRect(30, 72, 140, 42, INK);
+      textCenter(c, 101, "POWER", F_TITLE, BG);
+      footer(c, {"-", nullptr}, {"dismiss", nullptr});
+      break;
+    case app::Condition::NoSd:
+      header(c, "NO SD CARD", false, nullptr, false);
+      textCenter(c, 96, "Insert SD card", F_TITLE);
+      textCenter(c, 124, "Cannot record/list", F_REG);
+      footer(c, {"exit", "(hold)"}, {"-", nullptr});
+      break;
+    case app::Condition::StorageFull:
+      header(c, "STORAGE FULL", false, nullptr, false);
+      textCenter(c, 96, "Free space needed", F_TITLE);
+      footer(c, {"-", nullptr}, {"OK", nullptr});
+      break;
+    case app::Condition::TimeNotSet:
+      header(c, "TIME NOT SET", false, nullptr, false);
+      textCenter(c, 88, "Recording allowed", F_TITLE);
+      textCenter(c, 118, "Timestamps unset", F_REG);
+      footer(c, {"-", nullptr}, {"continue", nullptr});
+      break;
+    case app::Condition::Sleep:
+      header(c, "scribr", true, nullptr, false);
+      textCenter(c, 105, "Sleeping...", F_TITLE);
+      break;
+    case app::Condition::None:
+      break;
+  }
 }
 
 }  // namespace
@@ -221,6 +265,11 @@ void screens::render(const Model& m) {
   GFXcanvas1& c = display::canvas();
   c.fillScreen(BG);
   c.setTextWrap(false);
+
+  if (m.condition != app::Condition::None) {
+    conditionScreen(c, m);
+    return;
+  }
 
   switch (m.screen) {
     case Screen::IDLE:           idle(c, m);          break;

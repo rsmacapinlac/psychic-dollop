@@ -4,14 +4,11 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-#include "../hal/board_power_bsp.h"
 #include "../hal/pins.h"
+#include "../hal/power.h"
 #include "../drivers/epaper_driver_bsp.h"  // pulls in SPI2_HOST via driver/spi_master.h
 
 namespace {
-// Board power rails (EPD, audio, VBAT). Constructed at startup like the
-// reference firmware's global `board` — GPIO config runs before setup().
-board_power_bsp_t      power(EPD_PWR_PIN, AUDIO_PWR_PIN, VBAT_PWR_PIN);
 epaper_driver_display* epd = nullptr;
 
 // The 1-bit drawing surface. Same dimensions/stride as the panel buffer.
@@ -61,8 +58,9 @@ void requestRefresh(bool full) {
 namespace display {
 
 void begin() {
-  power.VBAT_POWER_ON();   // latch the board's own power on
-  power.POWEER_EPD_ON();   // enable the e-paper rail
+  hal::power::begin();
+  hal::power::holdVbatLatch();   // GPIO17 HIGH keeps the board powered
+  hal::power::enableEpaperRail();
   delay(200);              // let the panel settle before talking to it
 
   custom_lcd_spi_t cfg = {};

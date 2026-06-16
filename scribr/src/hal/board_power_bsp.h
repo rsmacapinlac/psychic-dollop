@@ -16,6 +16,13 @@ public:
     void POWEER_EPD_OFF();
     void POWEER_Audio_ON();
     void POWEER_Audio_OFF();
+
+    // GPIO17 is a power-hold latch, not an active-low peripheral rail:
+    // HIGH holds board power, LOW releases it for intentional shutdown.
+    void holdVbatLatch();
+    void releaseVbatLatch();
+
+    // Backward-compatible prototype names. Prefer the explicit latch names.
     void VBAT_POWER_ON();
     void VBAT_POWER_OFF();
 };

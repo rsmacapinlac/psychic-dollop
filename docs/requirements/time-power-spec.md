@@ -15,36 +15,21 @@ when these subsystems are wired into scribr.
   `2026-06-14T09:32:00Z`). Stored per note as `created_utc=` in the `.meta` file.
 - **NTP sync:** servers `pool.ntp.org`, `time.google.com`, `time.cloudflare.com`;
   timeout **6 s** (boot retry) to **8 s**. NTP runs only when WiFi is up.
-- **Local time for display only:** `LOCAL_TIME_OFFSET_MIN` (default **120** =
-  UTC+2). Applied when rendering labels; **storage stays UTC**.
+- **Local time for display only:** applied when rendering labels; **storage stays
+  UTC**. scribr makes this offset configurable via the SD-card boot config
+  (`/scribr.cfg`, key `local_offset_min`) — see `boot-configuration.md` and ADR
+  `../adr/0005-time-model.md`.
+- **Manual RTC bootstrap:** v1 has no on-device settings screen. A valid optional
+  `rtc_set_utc=` entry in `/scribr.cfg` may be used at boot to set the system
+  clock and RTC. This is a one-shot/manual bootstrap mechanism, not an ongoing
+  time source; repeated stale application must be prevented. See
+  `boot-configuration.md`.
 
-### PCF85063 register access (reimplementation reference)
+### PCF85063 register access
 
-The reference used a board I²C BSP that is **not** vendored into scribr, so the
-register protocol is captured here. Time is one 7-byte block starting at
-`0x04`, all **BCD**:
-
-| Offset | Reg  | Field    | Read mask | Notes                          |
-| ------ | ---- | -------- | --------- | ------------------------------ |
-| 0      | 0x04 | seconds  | `& 0x7F`  | bit 7 = **OS** (osc stopped)   |
-| 1      | 0x05 | minutes  | `& 0x7F`  |                                |
-| 2      | 0x06 | hours    | `& 0x3F`  | 24-hour mode                   |
-| 3      | 0x07 | days     | `& 0x3F`  | day of month                   |
-| 4      | 0x08 | weekday  | `& 0x07`  | 0–6                            |
-| 5      | 0x09 | months   | `& 0x1F`  | 1–12                           |
-| 6      | 0x0A | years    | full byte | add 2000                       |
-
-- **BCD:** `dec = (v>>4)*10 + (v&0x0F)`; `bcd = ((v/10)<<4) | (v%10)`.
-- **Validity:** if seconds bit 7 (OS) is set, the oscillator stopped → time is
-  invalid (needs re-set). Reference also range-checks year 2024–2099, month
-  1–12, day 1–31, h/m/s in range.
-- **Write:** same 7 registers from `0x04`, BCD, with `year - 2000`.
-- **Epoch:** set `TZ=UTC0`, `tzset()`, then `mktime()`; a synced clock is
-  sanity-checked as `epoch >= 1700000000`.
-
-### Decisions to revisit
-- Single fixed offset constant — **no timezone database, no DST** handling.
-- Local offset must be set manually per region/season.
+The raw register protocol — BCD layout, the OS (oscillator-stopped) validity
+bit, write sequence, and epoch conversion — lives in the board reference:
+`../reference/rtc-pcf85063.md`.
 
 ## Battery
 
@@ -61,22 +46,17 @@ register protocol is captured here. Time is one 7-byte block starting at
 - **Low-battery policy:** warn at **≤ 15%**, recover at **≥ 20%** (hysteresis),
   re-checked every **30 s** (`BAT_CHECK_INTERVAL_MS`).
 
-### Decisions to revisit
-- The curve is a rough Li-ion approximation (5% granularity) — fine for a gauge,
-  not for fuel-gauge accuracy.
-- The ×2 divider ratio assumes the board's specific resistor divider.
+> Gauge accuracy (the rough 5% curve and board-specific divider) is an open
+> technical decision — **TD-1** in `open-technical-decisions.md`.
 
 ## Power rails & latch
 
-All rails are **active-low** enables.
-
-| Rail            | GPIO | Notes                                          |
-| --------------- | ---- | ---------------------------------------------- |
-| VBAT power latch | 17  | Software hold — must be asserted to stay on    |
-| E-paper rail    | 6    | Powers the display panel                       |
-| Audio rail      | 42   | Powers the codec / amp                         |
-
-The board stays on only while the **VBAT latch** is held; releasing it cuts power.
+The e-paper and audio controls are **active-low** peripheral rail enables; the
+GPIO map is in the board reference (`../reference/hardware-pinout.md`). The
+**VBAT latch** (GPIO17) is not treated as a normal active-low rail: **HIGH holds
+board power** and LOW releases the latch for intentional shutdown. The firmware
+must assert the latch deliberately and never drop it unintentionally, or the
+board powers off.
 
 ## Sleep
 
@@ -87,9 +67,9 @@ The board stays on only while the **VBAT latch** is held; releasing it cuts powe
 - **Wake source:** EXT1 on **BTN_REC (GPIO0)** and **BTN_PWR (GPIO18)**,
   `ESP_EXT1_WAKEUP_ANY_LOW` (any button pressed wakes the device).
 
-### Decisions to revisit
-- 120 s timeout is a fixed constant.
-- Only the two buttons wake the device; no timed/RTC wake is configured.
+> The above describes the reference firmware's **deep** sleep. scribr v1 uses
+> **light**-sleep after the same 120 s with buttons-only wake; the sleep depth is
+> open — see ADR `../adr/0006-power-and-sleep-model.md` and **TD-4**.
 
 See also `docs/requirements/recording-playback-spec.md` and
-`docs/device-rendering-constraints.md`.
+`docs/reference/device-rendering-constraints.md`.

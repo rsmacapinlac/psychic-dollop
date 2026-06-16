@@ -16,7 +16,7 @@ board. Captured here so the mapping survives removal of the reference firmware.
 | BUSY   | 8    | busy (input)                 |
 | PWR    | 6    | panel power rail, active-low |
 
-Panel: 200×200, 1-bit (1.54"). See `docs/device-rendering-constraints.md`.
+Panel: 200×200, 1-bit (1.54"). See `docs/reference/device-rendering-constraints.md`.
 
 ## Buttons (active-low, internal pull-ups)
 
@@ -25,13 +25,16 @@ Panel: 200×200, 1-bit (1.54"). See `docs/device-rendering-constraints.md`.
 | BOOT / REC | 0    | also strapping pin; deep-sleep EXT1 wake source  |
 | PWR        | 18   | deep-sleep EXT1 wake source                      |
 
-## Power rails (active-low enables)
+## Power controls
 
-| Rail        | GPIO | Notes                                       |
-| ----------- | ---- | ------------------------------------------- |
-| VBAT latch  | 17   | software power-hold — must be held to stay on |
-| E-paper     | 6    | (same as EPD PWR above)                     |
-| Audio       | 42   | codec / amplifier                           |
+The e-paper and audio controls are active-low peripheral rail enables. The VBAT
+control is different: it is the board's software power-hold latch.
+
+| Control     | GPIO | Active level / notes                                      |
+| ----------- | ---- | --------------------------------------------------------- |
+| VBAT latch  | 17   | **HIGH = hold board power**, LOW = release/power off      |
+| E-paper     | 6    | active-low rail enable (same as EPD PWR above)            |
+| Audio       | 42   | active-low codec / amplifier rail enable                  |
 
 ## Battery sense
 

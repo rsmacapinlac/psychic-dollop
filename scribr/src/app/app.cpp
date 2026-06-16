@@ -1,28 +1,34 @@
 #include "app.h"
 
 #include <Arduino.h>
-#include <OneButton.h>
 #include <stdio.h>
 #include <string.h>
 
-#include "../hal/pins.h"
+#include "buttons.h"
 #include "display.h"
 #include "model.h"
 #include "screens.h"
+#include "../services/audio_service.h"
+#include "../services/battery.h"
+#include "../services/clock.h"
+#include "../services/config_store.h"
+#include "../services/sd_card.h"
+#include "../services/sleep_service.h"
+#include "../services/storage.h"
 
 namespace {
 
 app::Model model;
-
-// Two buttons, active-low with internal pull-ups (pin, activeLow, pullupActive).
-OneButton btnBoot(BTN_BOOT_PIN, true, true);
-OneButton btnPwr(BTN_PWR_PIN, true, true);
 
 // Redraw bookkeeping. needFull is sticky for the frame: any full request wins.
 bool     needRender = true;
 bool     needFull   = true;
 uint32_t recStartMs  = 0;
 uint32_t playStartMs = 0;
+bool lowBatteryShown = false;
+uint32_t lastActivityMs = 0;
+bool sleepPending = false;
+uint16_t currentRecordingId = 0;
 
 void requestRender(bool full) {
   needRender = true;
@@ -34,105 +40,217 @@ void go(app::Screen s, bool full) {
   requestRender(full);
 }
 
-// ── fake data + mutations (prototype) ───────────────────────────────
-void seedRecordings() {
-  const struct { const char* date; int dur; } seed[] = {
-    {"2026-06-14 09:32", 14}, {"2026-06-14 08:01", 128}, {"2026-06-13 18:05", 95},
-    {"2026-06-13 08:47", 312}, {"2026-06-12 22:10", 53}, {"2026-06-11 21:19", 47},
-  };
-  model.recCount = sizeof(seed) / sizeof(seed[0]);
-  for (int i = 0; i < model.recCount; i++) {
-    strncpy(model.recs[i].date, seed[i].date, sizeof(model.recs[i].date) - 1);
-    model.recs[i].dur = seed[i].dur;
+// ── storage-backed recording list ──────────────────────────────────
+void refreshSystemModel() {
+  services::battery::Reading b = services::battery::last();
+  model.battery = b.valid ? b.percent : -1;
+  model.batteryV = b.valid ? b.voltage : 0.0f;
+  if (b.low && !lowBatteryShown && model.condition == app::Condition::None) {
+    lowBatteryShown = true;
+    model.condition = app::Condition::LowBattery;
+    requestRender(true);
   }
+  if (!b.low) lowBatteryShown = false;
+  model.sdPresent = services::sdcard::mounted();
+  model.sdFreeGB = services::sdcard::freeGB();
+  model.timeSet = services::clock::status().timeSet;
 }
 
-void addRecording(int dur) {
-  if (model.recCount >= app::MAX_RECS) model.recCount = app::MAX_RECS - 1;  // drop oldest
-  for (int i = model.recCount; i > 0; i--) model.recs[i] = model.recs[i - 1];
-  snprintf(model.recs[0].date, sizeof(model.recs[0].date), "2026-06-14 %02d:%02d",
-           9 + (model.recCount % 12), (model.recCount * 7) % 60);
-  model.recs[0].dur = dur;
-  model.recCount++;
+void loadRecordingsFromStorage() {
+  services::storage::rescan();
+  model.recCount = 0;
+  const size_t count = services::storage::noteCount();
+  for (size_t i = 0; i < count && model.recCount < app::MAX_RECS; ++i) {
+    services::storage::NoteSummary n;
+    if (!services::storage::noteAt(i, n)) continue;
+    app::Rec& r = model.recs[model.recCount++];
+    r.id = n.id;
+    r.dur = (int)n.durationSec;
+    r.bytes = n.byteSize;
+    strncpy(r.wavPath, n.wavPath, sizeof(r.wavPath) - 1);
+    if (n.hasTimestamp) {
+      services::clock::formatLocal(n.createdEpoch, r.date, sizeof(r.date));
+    } else {
+      strncpy(r.date, "time not set", sizeof(r.date) - 1);
+    }
+  }
+  if (model.listIndex >= model.recCount) model.listIndex = model.recCount > 0 ? model.recCount - 1 : 0;
 }
 
 void deleteCurrent() {
   if (model.recCount == 0) return;
-  for (int i = model.listIndex; i < model.recCount - 1; i++) model.recs[i] = model.recs[i + 1];
-  model.recCount--;
-  if (model.listIndex >= model.recCount) model.listIndex = model.recCount > 0 ? model.recCount - 1 : 0;
+  services::storage::deleteNote(model.recs[model.listIndex].id);
+  loadRecordingsFromStorage();
 }
 
-// ── button callbacks (dispatch on current screen) ───────────────────
-void onBootClick() {
-  switch (model.screen) {
-    case app::Screen::REC: go(app::Screen::IDLE, true); break;  // cancel: discard, don't save
-    case app::Screen::LIST:
-      if (model.recCount > 0) { model.listIndex = (model.listIndex + 1) % model.recCount; requestRender(true); }
-      break;
-    case app::Screen::DELETE_CONFIRM: go(app::Screen::LIST, true); break;  // cancel
-    default: break;
-  }
-}
-void onBootDouble() {
-  if (model.screen == app::Screen::IDLE) { model.listIndex = 0; go(app::Screen::LIST, true); }
-}
-void onBootLong() {
-  if (model.screen == app::Screen::LIST) go(app::Screen::IDLE, true);  // exit
-}
+// ── button dispatch (typed events from buttons service) ─────────────
+void onButtonEvent(buttons::Button button, buttons::Press press) {
+  lastActivityMs = millis();
+  const bool boot = button == buttons::Button::BOOT;
+  const bool pwr = button == buttons::Button::PWR;
+  Serial.printf("scribr: button %s %s screen=%d condition=%d\n",
+                boot ? "BOOT" : "PWR",
+                press == buttons::Press::Short ? "short" : (press == buttons::Press::Long ? "long" : "double"),
+                (int)model.screen,
+                (int)model.condition);
 
-void onPwrClick() {
-  switch (model.screen) {
-    case app::Screen::REC:
-      addRecording(model.recElapsed); go(app::Screen::IDLE, true);  // save
-      break;
-    case app::Screen::LIST:
-      if (model.recCount > 0) { model.playElapsed = 0; playStartMs = millis(); go(app::Screen::PLAY, true); }
-      break;
-    case app::Screen::PLAY: go(app::Screen::IDLE, true); break;  // stop
-    case app::Screen::DELETE_CONFIRM: deleteCurrent(); go(app::Screen::LIST, true); break;  // confirm
-    default: break;
+  if (model.condition != app::Condition::None) {
+    if ((model.condition == app::Condition::LowBattery || model.condition == app::Condition::Charging ||
+         model.condition == app::Condition::StorageFull || model.condition == app::Condition::TimeNotSet) &&
+        pwr && press == buttons::Press::Short) {
+      model.condition = app::Condition::None;
+      go(model.screen, true);
+    } else if (model.condition == app::Condition::NoSd && boot && press == buttons::Press::Long) {
+      model.condition = app::Condition::None;
+      go(app::Screen::IDLE, true);
+    } else if (model.condition == app::Condition::Sleep) {
+      model.condition = app::Condition::None;
+      sleepPending = false;
+      go(app::Screen::IDLE, true);
+    }
+    return;
   }
-}
-void onPwrDouble() {
-  if (model.screen == app::Screen::IDLE) { model.recElapsed = 0; recStartMs = millis(); go(app::Screen::REC, true); }
-}
-void onPwrLong() {
-  if (model.screen == app::Screen::LIST && model.recCount > 0) go(app::Screen::DELETE_CONFIRM, true);
+
+  if (boot && press == buttons::Press::Short) {
+    switch (model.screen) {
+      case app::Screen::REC:
+        services::audio::cancelRecording();
+        currentRecordingId = 0;
+        go(app::Screen::IDLE, true);
+        break;  // cancel: discard
+      case app::Screen::LIST:
+        if (model.recCount > 0) { model.listIndex = (model.listIndex + 1) % model.recCount; requestRender(true); }
+        break;
+      case app::Screen::DELETE_CONFIRM: go(app::Screen::LIST, true); break;  // cancel
+      default: break;
+    }
+  } else if (boot && press == buttons::Press::Double) {
+    if (model.screen == app::Screen::IDLE) {
+      if (!services::storage::available()) { model.condition = app::Condition::NoSd; requestRender(true); }
+      else { loadRecordingsFromStorage(); model.listIndex = 0; go(app::Screen::LIST, true); }
+    }
+  } else if (boot && press == buttons::Press::Long) {
+    if (model.screen == app::Screen::LIST) go(app::Screen::IDLE, true);  // exit
+  } else if (pwr && press == buttons::Press::Short) {
+    switch (model.screen) {
+      case app::Screen::REC: {
+        uint32_t duration = 0, bytes = 0;
+        const bool saved = services::audio::stopRecordingAndSave(duration, bytes);
+        const uint32_t wallDuration = max<uint32_t>(1, (millis() - recStartMs + 500) / 1000);
+        Serial.printf("scribr: recording stop saved=%d audioDuration=%lu wallDuration=%lu bytes=%lu id=%u\n",
+                      saved ? 1 : 0,
+                      (unsigned long)duration,
+                      (unsigned long)wallDuration,
+                      (unsigned long)bytes,
+                      currentRecordingId);
+        if (saved && currentRecordingId != 0) {
+          time_t createdUtc = 0;
+          const bool hasTime = services::clock::nowUtc(createdUtc);
+          // Use wall-clock duration for metadata/UI. During hardware bring-up,
+          // byte-derived duration can drift if codec/I2S clocking is not yet
+          // final; the user's visible REC timer is the acceptance source.
+          services::storage::writeMetadata(currentRecordingId, wallDuration, hasTime, createdUtc);
+        }
+        currentRecordingId = 0;
+        loadRecordingsFromStorage();
+        go(app::Screen::IDLE, true);
+        break;
+      }
+      case app::Screen::LIST:
+        if (model.recCount > 0 && services::audio::startPlayback(model.recs[model.listIndex].wavPath)) {
+          model.playElapsed = 0;
+          playStartMs = millis();
+          go(app::Screen::PLAY, true);
+        } else if (model.recCount == 0) {
+          go(app::Screen::IDLE, true);
+        }
+        break;
+      case app::Screen::PLAY:
+        services::audio::stopPlayback();
+        loadRecordingsFromStorage();
+        go(app::Screen::LIST, true);
+        break;  // stop -> recordings index
+      case app::Screen::DELETE_CONFIRM: deleteCurrent(); go(app::Screen::LIST, true); break;  // confirm
+      default: break;
+    }
+  } else if (pwr && press == buttons::Press::Double) {
+    if (model.screen == app::Screen::IDLE) {
+      if (!services::storage::available()) { model.condition = app::Condition::NoSd; requestRender(true); return; }
+      char wav[32], meta[32];
+      currentRecordingId = services::storage::nextNoteId();
+      services::storage::pathsForId(currentRecordingId, wav, sizeof(wav), meta, sizeof(meta));
+      Serial.printf("scribr: recording start id=%u path=%s\n", currentRecordingId, wav);
+      if (services::audio::startRecording(wav)) {
+        model.recElapsed = 0;
+        recStartMs = millis();
+        go(app::Screen::REC, true);
+      } else {
+        Serial.println("scribr: recording start failed");
+        currentRecordingId = 0;
+        model.condition = services::storage::available() ? app::Condition::StorageFull : app::Condition::NoSd;
+        requestRender(true);
+      }
+    }
+  } else if (pwr && press == buttons::Press::Long) {
+    if (model.screen == app::Screen::LIST && model.recCount > 0) go(app::Screen::DELETE_CONFIRM, true);
+  }
 }
 
 // ── timers for the live screens ─────────────────────────────────────
 void serviceTimers() {
   if (model.screen == app::Screen::REC) {
+    if (services::audio::state() == services::audio::State::Idle && millis() - recStartMs > 1000) {
+      Serial.println("scribr: recording worker stopped unexpectedly; returning to IDLE");
+      currentRecordingId = 0;
+      go(app::Screen::IDLE, true);
+      return;
+    }
     int e = (int)((millis() - recStartMs) / 1000);
     if (e != model.recElapsed) { model.recElapsed = e; requestRender(false); }  // partial tick
   } else if (model.screen == app::Screen::PLAY) {
-    int dur = model.recs[model.listIndex].dur;
-    int e = (int)((millis() - playStartMs) / 1000);
-    if (e >= dur) { go(app::Screen::IDLE, true); }                              // auto-finish
-    else if (e != model.playElapsed) { model.playElapsed = e; requestRender(false); }
+    // Let the audio service be the source of truth for playback completion.
+    // Metadata duration can be missing/zero for imported or partially indexed
+    // notes; treating e >= dur as EOF immediately bounces PLAYBACK to IDLE.
+    int e = (int)services::audio::playbackElapsedSec();
+    if (services::audio::state() == services::audio::State::Idle) {
+      loadRecordingsFromStorage();
+      go(app::Screen::LIST, true);
+    } else if (e != model.playElapsed) { model.playElapsed = e; requestRender(false); }
   }
 }
 
 }  // namespace
 
 void app::begin() {
-  seedRecordings();
+  services::sdcard::begin();
+  services::config::BootConfig cfg;
+  services::config::loadBootConfig(cfg);
+  services::clock::begin(cfg);
+  services::battery::begin();
+  services::storage::begin();
+  services::audio::begin();
 
-  btnBoot.attachClick(onBootClick);
-  btnBoot.attachDoubleClick(onBootDouble);
-  btnBoot.attachLongPressStart(onBootLong);
-  btnPwr.attachClick(onPwrClick);
-  btnPwr.attachDoubleClick(onPwrDouble);
-  btnPwr.attachLongPressStart(onPwrLong);
+  refreshSystemModel();
+  loadRecordingsFromStorage();
+  buttons::begin(onButtonEvent);
 
+  lastActivityMs = millis();
+  if (!services::clock::status().timeSet) model.condition = app::Condition::TimeNotSet;
   go(app::Screen::IDLE, true);
 }
 
 void app::tick() {
-  btnBoot.tick();
-  btnPwr.tick();
+  buttons::tick();
+  services::battery::tick();
+  refreshSystemModel();
   serviceTimers();
+
+  if (model.screen == app::Screen::IDLE && model.condition == app::Condition::None &&
+      millis() - lastActivityMs >= 120000UL) {
+    model.condition = app::Condition::Sleep;
+    sleepPending = true;
+    requestRender(true);
+  }
 
   // Dispatch a redraw only when the previous refresh has finished (it runs on
   // the other core). Until then buttons keep being serviced above.
@@ -141,5 +259,14 @@ void app::tick() {
     if (needFull) display::flushFull(); else display::flush();
     needRender = false;
     needFull = false;
+  }
+
+  if (sleepPending && model.condition == app::Condition::Sleep && !needRender && !display::busy()) {
+    services::sleep::enterLightSleepUntilButton();
+    services::sleep::wakeToIdle();
+    sleepPending = false;
+    model.condition = app::Condition::None;
+    lastActivityMs = millis();
+    go(app::Screen::IDLE, true);
   }
 }
