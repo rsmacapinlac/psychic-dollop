@@ -256,6 +256,7 @@ void recordTask(void*) {
   File wav = sdcard::fs().open(activePath, FILE_WRITE);
   if (!wav) {
     logAudio("scribr: failed to open WAV for recording path=%s", activePath);
+    sdcard::invalidate();  // likely a removed/stale card — re-probe next attempt
     current = State::Idle;
     finishWorker();
   }
@@ -413,6 +414,15 @@ State state() { return current; }
 bool startRecording(const char* wavPath) {
   if (current != State::Idle || !wavPath || !sdcard::mounted()) return false;
   if (!ensureI2s()) return false;
+
+  // The card may have been swapped since boot; cardType() is cached and won't
+  // reveal it, leaving a stale mount that fails every write. Probe with a real
+  // round-trip and remount once so a reinserted card records without a reset.
+  if (!sdcard::probeWritable()) {
+    logAudio("scribr: SD write probe failed; remounting");
+    sdcard::invalidate();
+    if (!sdcard::ensureMounted() || !sdcard::probeWritable()) return false;
+  }
 
   strncpy(activePath, wavPath, sizeof(activePath) - 1);
   activePath[sizeof(activePath) - 1] = 0;

@@ -48,6 +48,30 @@ bool ensureMounted() {
 }
 
 bool mounted() { return ensureMounted(); }
+
+void invalidate() {
+  // Tear down the mount and clear the throttle so the next ensureMounted() does
+  // a fresh mountOnce() against whatever card is physically present now.
+  SD_MMC.end();
+  isMounted = false;
+  lastAttemptMs = 0;
+  Serial.println("scribr: SD mount invalidated; will re-probe");
+}
+
+bool probeWritable() {
+  if (!isMounted) return false;
+  // cardType() is latched at mount and cannot tell that the card was hot-swapped,
+  // so force an actual transaction: a write cannot be served from cache and will
+  // fail on a stale/removed card.
+  const char* probe = "/.scribr_probe";
+  File f = SD_MMC.open(probe, FILE_WRITE);
+  if (!f) return false;
+  const size_t n = f.write((uint8_t)0xA5);
+  f.close();
+  SD_MMC.remove(probe);
+  return n == 1;
+}
+
 fs::FS& fs() { return SD_MMC; }
 uint64_t totalBytes() { return isMounted ? SD_MMC.totalBytes() : 0; }
 uint64_t usedBytes() { return isMounted ? SD_MMC.usedBytes() : 0; }
