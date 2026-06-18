@@ -65,10 +65,10 @@ validation gates; some are blocked by open UX/technical decisions.
 
 | ID | Status | Criterion | Source | Verification |
 | -- | ------ | --------- | ------ | ------------ |
-| AC-STO-01 | Final | SD card is the source of truth; the list is built by scanning `/notes`, not from a fixed RAM recording array. | ADR 0004 | Code review; reboot with preloaded card. |
-| AC-STO-02 | Final | Notes use `/notes/note_%03d.wav` and matching `/notes/note_%03d.meta`. | ADR 0004 | Record note; inspect SD card. |
-| AC-STO-03 | Final | Next note index is derived from scanning existing files using highest index + 1. | ADR 0004 | Preload gaps; record new note. |
-| AC-STO-04 | Final | `.meta` contains at least `created_utc=` and duration. | ADR 0004 | Inspect metadata file. |
+| AC-STO-01 | Final | SD card is the source of truth; the list is built by scanning `/recordings`, not from a fixed RAM recording array. | ADR 0004 | Code review; reboot with preloaded card. |
+| AC-STO-02 | Final | Each note is a directory `/recordings/<YYYYMMDDTHHMMSS>/` containing `session.wav` and `session.meta`. | ADR 0004 | Record note; inspect SD card. |
+| AC-STO-03 | Final | The recording directory name is the UTC capture time (`%Y%m%dT%H%M%S`); an `unset-NNN` fallback is used only when the clock is not set. No separate index/counter file is kept. | ADR 0004 | Record with clock set and unset; inspect SD card. |
+| AC-STO-04 | Final | Creation time comes from the directory name; `session.meta` contains at least `duration_sec=`. | ADR 0004 | Inspect directory name and metadata file. |
 | AC-STO-05 | Final | RECORDINGS_LIST sorts notes newest first by metadata creation time. | ADR 0004 | Preload known timestamps; verify order. |
 | AC-STO-06 | Final | Deleting a note removes both `.wav` and `.meta`; list updates and selection clamps. | ADR 0004, `state-machine.md` | Delete first/middle/last note. |
 | AC-STO-07 | Provisional | Hundreds of notes can be scanned/listed without exhausting RAM; UI still pages the 3-row window. | `non-functional.md`, ADR 0004 | Preload large card test. |

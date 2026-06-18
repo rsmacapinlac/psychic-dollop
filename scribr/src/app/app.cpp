@@ -28,7 +28,7 @@ uint32_t playStartMs = 0;
 bool lowBatteryShown = false;
 uint32_t lastActivityMs = 0;
 bool sleepPending = false;
-uint16_t currentRecordingId = 0;
+char currentRecordingDir[20] = {0};  // active recording's directory name, "" when idle
 
 void requestRender(bool full) {
   needRender = true;
@@ -64,7 +64,7 @@ void loadRecordingsFromStorage() {
     services::storage::NoteSummary n;
     if (!services::storage::noteAt(i, n)) continue;
     app::Rec& r = model.recs[model.recCount++];
-    r.id = n.id;
+    strncpy(r.dir, n.dir, sizeof(r.dir) - 1);
     r.dur = (int)n.durationSec;
     r.bytes = n.byteSize;
     strncpy(r.wavPath, n.wavPath, sizeof(r.wavPath) - 1);
@@ -79,7 +79,7 @@ void loadRecordingsFromStorage() {
 
 void deleteCurrent() {
   if (model.recCount == 0) return;
-  services::storage::deleteNote(model.recs[model.listIndex].id);
+  services::storage::deleteNote(model.recs[model.listIndex].dir);
   loadRecordingsFromStorage();
 }
 
@@ -115,7 +115,8 @@ void onButtonEvent(buttons::Button button, buttons::Press press) {
     switch (model.screen) {
       case app::Screen::REC:
         services::audio::cancelRecording();
-        currentRecordingId = 0;
+        if (currentRecordingDir[0]) services::storage::deleteNote(currentRecordingDir);
+        currentRecordingDir[0] = 0;
         go(app::Screen::IDLE, true);
         break;  // cancel: discard
       case app::Screen::LIST:
@@ -137,21 +138,25 @@ void onButtonEvent(buttons::Button button, buttons::Press press) {
         uint32_t duration = 0, bytes = 0;
         const bool saved = services::audio::stopRecordingAndSave(duration, bytes);
         const uint32_t wallDuration = max<uint32_t>(1, (millis() - recStartMs + 500) / 1000);
-        Serial.printf("scribr: recording stop saved=%d audioDuration=%lu wallDuration=%lu bytes=%lu id=%u\n",
+        Serial.printf("scribr: recording stop saved=%d audioDuration=%lu wallDuration=%lu bytes=%lu dir=%s\n",
                       saved ? 1 : 0,
                       (unsigned long)duration,
                       (unsigned long)wallDuration,
                       (unsigned long)bytes,
-                      currentRecordingId);
-        if (saved && currentRecordingId != 0) {
-          time_t createdUtc = 0;
-          const bool hasTime = services::clock::nowUtc(createdUtc);
-          // Use wall-clock duration for metadata/UI. During hardware bring-up,
-          // byte-derived duration can drift if codec/I2S clocking is not yet
-          // final; the user's visible REC timer is the acceptance source.
-          services::storage::writeMetadata(currentRecordingId, wallDuration, hasTime, createdUtc);
+                      currentRecordingDir);
+        if (saved && currentRecordingDir[0]) {
+          // Creation time is carried by the directory name; the sidecar only
+          // records duration. Use wall-clock duration for metadata/UI: during
+          // hardware bring-up byte-derived duration can drift if codec/I2S
+          // clocking is not yet final, and the visible REC timer is the
+          // acceptance source.
+          services::storage::writeMetadata(currentRecordingDir, wallDuration);
+        } else if (currentRecordingDir[0]) {
+          // Too short / no audio: audio_service removed session.wav, so drop the
+          // now-empty directory rather than leaving an orphan on the card.
+          services::storage::deleteNote(currentRecordingDir);
         }
-        currentRecordingId = 0;
+        currentRecordingDir[0] = 0;
         loadRecordingsFromStorage();
         go(app::Screen::IDLE, true);
         break;
@@ -176,17 +181,26 @@ void onButtonEvent(buttons::Button button, buttons::Press press) {
   } else if (pwr && press == buttons::Press::Double) {
     if (model.screen == app::Screen::IDLE) {
       if (!services::storage::available()) { model.condition = app::Condition::NoSd; requestRender(true); return; }
-      char wav[32], meta[32];
-      currentRecordingId = services::storage::nextNoteId();
-      services::storage::pathsForId(currentRecordingId, wav, sizeof(wav), meta, sizeof(meta));
-      Serial.printf("scribr: recording start id=%u path=%s\n", currentRecordingId, wav);
+      char wav[48], meta[48];
+      time_t createdUtc = 0;
+      const bool hasTime = services::clock::nowUtc(createdUtc);
+      if (!services::storage::newNote(hasTime, createdUtc, currentRecordingDir, sizeof(currentRecordingDir),
+                                      wav, sizeof(wav), meta, sizeof(meta))) {
+        Serial.println("scribr: could not create recording directory");
+        currentRecordingDir[0] = 0;
+        model.condition = services::storage::available() ? app::Condition::StorageFull : app::Condition::NoSd;
+        requestRender(true);
+        return;
+      }
+      Serial.printf("scribr: recording start dir=%s path=%s\n", currentRecordingDir, wav);
       if (services::audio::startRecording(wav)) {
         model.recElapsed = 0;
         recStartMs = millis();
         go(app::Screen::REC, true);
       } else {
         Serial.println("scribr: recording start failed");
-        currentRecordingId = 0;
+        services::storage::deleteNote(currentRecordingDir);
+        currentRecordingDir[0] = 0;
         model.condition = services::storage::available() ? app::Condition::StorageFull : app::Condition::NoSd;
         requestRender(true);
       }
@@ -201,7 +215,9 @@ void serviceTimers() {
   if (model.screen == app::Screen::REC) {
     if (services::audio::state() == services::audio::State::Idle && millis() - recStartMs > 1000) {
       Serial.println("scribr: recording worker stopped unexpectedly; returning to IDLE");
-      currentRecordingId = 0;
+      // Leave the directory as-is: the worker may have committed valid audio, and
+      // the next scan ignores any directory without a real session.wav.
+      currentRecordingDir[0] = 0;
       go(app::Screen::IDLE, true);
       return;
     }
@@ -242,6 +258,13 @@ void app::begin() {
 void app::tick() {
   buttons::tick();
   services::battery::tick();
+  // Host can push the real UTC time over USB serial ("TIME <epoch>") at any time.
+  // On success, drop the TIME NOT SET screen and redraw with the live clock.
+  if (services::clock::pollSerialTimeSet()) {
+    lastActivityMs = millis();
+    if (model.condition == app::Condition::TimeNotSet) model.condition = app::Condition::None;
+    requestRender(true);
+  }
   refreshSystemModel();
   serviceTimers();
 

@@ -1,6 +1,17 @@
 # 0004 — Storage & Metadata Model
 
-**Status:** Accepted
+**Status:** Accepted (amended 2026-06-18)
+
+> **Amendment 2026-06-18 — earshot-compatible layout.** The on-disk layout now
+> mirrors the [earshot](https://github.com/rsmacapinlac/earshot) project's
+> filesystem-as-state model: **one directory per recording, named with the UTC
+> capture time**, instead of flat `note_%03d.wav` files. The directory name is the
+> authoritative timestamp; a `session.meta` sidecar carries duration. The
+> rejection of "timestamp in the filename" below stands for *flat* files — the
+> timestamp now names the containing **directory**, which is unambiguous and keeps
+> the scan self-healing. Decision bullets and consequences below reflect the
+> amended layout; the original ID-based scheme is retained only in this note for
+> history.
 
 ## Context
 
@@ -14,27 +25,39 @@ and must scale, and a future BLE sync (ADR 0007) needs a stable on-disk layout.
 
 - **SD card is the source of truth.** No fixed RAM cap; the in-RAM model holds
   only what the current screen needs.
-- **Files:** audio as `/notes/note_%03d.wav` (zero-padded), mono 16 kHz/16-bit
-  PCM per `../requirements/recording-playback-spec.md`. Write the 44-byte header last (backfill).
-- **Metadata sidecar:** one `.meta` file per note (e.g. `/notes/note_%03d.meta`)
-  holding at least `created_utc=` in ISO-8601 UTC, plus duration. The sidecar,
-  not the filename, is the authoritative timestamp/duration source.
-- **List building:** on entering RECORDINGS_LIST, **scan `/notes`**, sort by
+- **One directory per recording.** Each note is a directory under `/recordings/`
+  named with the UTC capture time as `%Y%m%dT%H%M%S` (e.g.
+  `/recordings/20260618T091500/`). If the clock is not yet set, an `unset-NNN`
+  fallback name is used so capture still works; such notes sort last and display
+  "time not set". The **directory name is the authoritative creation timestamp**.
+- **Files inside the directory:**
+  - `session.wav` — mono 16 kHz/16-bit PCM per
+    `../requirements/recording-playback-spec.md`; the 44-byte header is written
+    last (backfill).
+  - `session.meta` — sidecar holding `duration_sec=<seconds>`. Duration lives in
+    the sidecar (the WAV can't carry it cleanly and byte-derived duration drifts
+    during bring-up); creation time comes from the directory name, not the meta.
+- **List building:** on entering RECORDINGS_LIST, **scan `/recordings`**, sort by
   creation time (newest first), and page the 3-row window over the result. Read
   full metadata lazily for the rows actually shown.
-- **Durability:** a recording is committed only once its header is backfilled and
-  its `.meta` is written; a power loss or cancel mid-capture must not leave a note
-  that breaks the scan. Captures under ~1000 bytes are discarded.
-- **Naming/index:** next index derives from scanning existing files (highest +1),
-  so no separate counter file can desync.
+- **Durability:** a recording is committed only once its `session.wav` header is
+  backfilled and `session.meta` is written; a power loss or cancel mid-capture
+  must not leave a note that breaks the scan. Captures under ~1000 bytes are
+  discarded and their directory removed. The scan ignores any directory without a
+  valid `session.wav` (> 44 bytes), so a partial capture is self-healing.
+- **Naming:** the timestamp directory name is self-describing, so no separate
+  index/counter file is kept and none can desync. (When the clock is unset, the
+  `unset-NNN` fallback derives N from the highest existing `unset-*` directory.)
 
 ## Consequences
 
 - Scales to hundreds of notes; the list is honest about what's on the card.
 - Slightly more SD I/O on list entry (a directory scan) — acceptable; cache the
   sorted index for the session and invalidate on record/delete.
-- The sidecar format is a stable contract for BLE sync to read later.
-- Delete removes both the `.wav` and its `.meta`.
+- The directory-per-recording layout is a stable contract for BLE sync to read
+  later, and matches earshot so tooling/offload can be shared.
+- Delete removes the recording's directory and its contents (`session.wav` +
+  `session.meta`).
 
 ## Alternatives
 

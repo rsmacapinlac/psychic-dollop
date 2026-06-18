@@ -12,7 +12,9 @@ when these subsystems are wired into scribr.
 - **Canonical time is UTC.** The system clock and the RTC chip both hold UTC and
   are synced both ways (`rtcSyncSystemFromChip`, `rtcSyncChipFromSystem`).
 - **Serialized format:** ISO-8601 UTC, `%Y-%m-%dT%H:%M:%SZ` (e.g.
-  `2026-06-14T09:32:00Z`). Stored per note as `created_utc=` in the `.meta` file.
+  `2026-06-14T09:32:00Z`) for display/logging. A note's creation time is persisted
+  as its UTC recording-directory name `%Y%m%dT%H%M%S` (ADR 0004), not in the
+  sidecar.
 - **NTP sync:** servers `pool.ntp.org`, `time.google.com`, `time.cloudflare.com`;
   timeout **6 s** (boot retry) to **8 s**. NTP runs only when WiFi is up.
 - **Local time for display only:** applied when rendering labels; **storage stays

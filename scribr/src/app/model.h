@@ -9,9 +9,9 @@ enum class Screen : uint8_t { IDLE, REC, LIST, PLAY, DELETE_CONFIRM };
 enum class Condition : uint8_t { None, LowBattery, Charging, NoSd, StorageFull, TimeNotSet, Sleep };
 
 struct Rec {
-  uint16_t id = 0;
+  char dir[20] = {0};  // recording directory name, e.g. "20260618T091500"
   char date[20];      // "YYYY-MM-DD HH:MM" or "time not set"
-  char wavPath[32];
+  char wavPath[48];   // "/recordings/<dir>/session.wav"
   int  dur = 0;       // seconds
   uint32_t bytes = 0;
 };

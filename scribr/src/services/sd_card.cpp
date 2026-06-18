@@ -26,7 +26,7 @@ bool mountOnce() {
     isMounted = false;
     return false;
   }
-  if (!SD_MMC.exists("/notes")) SD_MMC.mkdir("/notes");
+  if (!SD_MMC.exists("/recordings")) SD_MMC.mkdir("/recordings");
   Serial.println("scribr: SD_MMC mounted");
   return true;
 }

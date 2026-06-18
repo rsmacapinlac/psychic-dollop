@@ -21,8 +21,9 @@ none of it now.
   device-side config API that persists back to that file) so it can set user
   configuration such as `local_offset_min` and time/bootstrap settings.
 - **BLE is the intended first implementation** (v2), reading the same on-disk
-  layout. The `.meta` sidecar, `/notes` naming, and `/scribr.cfg` configuration
-  file are treated as stable contracts for that consumer.
+  layout. The `/recordings/<YYYYMMDDTHHMMSS>/` directory-per-recording layout
+  (with `session.wav` + `session.meta`, ADR 0004) and the `/scribr.cfg`
+  configuration file are treated as stable contracts for that consumer.
 - **No WiFi portal.** The design's portal tokens are out of scope; if connectivity
   ever wants WiFi/NTP, it implements the same seam (and the time model already
   anticipates NTP, ADR 0005).
@@ -34,8 +35,8 @@ none of it now.
 - v1 stays small and offline; no BLE stack, pairing UI, or radio power cost yet.
 - Adding BLE later is additive: implement the seam, add any pairing/sync UI
   (new edge states, ADR 0008), and reuse the existing on-disk format.
-- Committing to the `/notes` + `.meta` contract and `/scribr.cfg` now avoids a
-  storage/configuration migration when sync arrives.
+- Committing to the `/recordings/<stamp>/` + `session.meta` contract and
+  `/scribr.cfg` now avoids a storage/configuration migration when sync arrives.
 
 ## Alternatives
 

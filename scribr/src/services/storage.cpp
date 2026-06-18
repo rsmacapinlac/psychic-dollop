@@ -4,6 +4,8 @@
 #include <FS.h>
 #include <algorithm>
 #include <ctype.h>
+#include <stdio.h>
+#include <string.h>
 #include <time.h>
 #include <vector>
 
@@ -11,22 +13,14 @@
 
 namespace services::storage {
 namespace {
+constexpr char kRoot[] = "/recordings";
+
 std::vector<NoteSummary> notes;
-uint16_t highestId = 0;
+unsigned highestUnset = 0;  // highest N seen in "unset-NNN" dirs, for fallback naming
 
-bool parseId(const char* name, uint16_t& id) {
-  const char* base = strrchr(name, '/');
-  base = base ? base + 1 : name;
-  if (strncmp(base, "note_", 5) != 0) return false;
-  if (!isdigit((unsigned char)base[5]) || !isdigit((unsigned char)base[6]) || !isdigit((unsigned char)base[7])) return false;
-  if (strcmp(base + 8, ".wav") != 0) return false;
-  id = (base[5] - '0') * 100 + (base[6] - '0') * 10 + (base[7] - '0');
-  return id > 0;
-}
-
-void makePaths(uint16_t id, char* wavOut, size_t wavLen, char* metaOut, size_t metaLen) {
-  if (wavOut && wavLen) snprintf(wavOut, wavLen, "/notes/note_%03u.wav", id);
-  if (metaOut && metaLen) snprintf(metaOut, metaLen, "/notes/note_%03u.meta", id);
+void buildPaths(const char* dir, char* wavOut, size_t wavLen, char* metaOut, size_t metaLen) {
+  if (wavOut && wavLen) snprintf(wavOut, wavLen, "%s/%s/session.wav", kRoot, dir);
+  if (metaOut && metaLen) snprintf(metaOut, metaLen, "%s/%s/session.meta", kRoot, dir);
 }
 
 int twoDigits(const char* s) {
@@ -51,16 +45,16 @@ int64_t daysFromCivil(int y, unsigned m, unsigned d) {
   return era * 146097LL + (int64_t)doe - 719468LL;
 }
 
-bool parseIsoUtcEpoch(const char* value, time_t& out) {
-  if (!value || strlen(value) != 20) return false;
-  if (value[4] != '-' || value[7] != '-' || value[10] != 'T' ||
-      value[13] != ':' || value[16] != ':' || value[19] != 'Z') return false;
-  const int year = fourDigits(value);
-  const int month = twoDigits(value + 5);
-  const int day = twoDigits(value + 8);
-  const int hour = twoDigits(value + 11);
-  const int minute = twoDigits(value + 14);
-  const int second = twoDigits(value + 17);
+// Parse a directory name shaped like %Y%m%dT%H%M%S (e.g. "20260618T091500", 15
+// chars) into a UTC epoch. The directory name is the authoritative timestamp.
+bool parseStampEpoch(const char* name, time_t& out) {
+  if (!name || strlen(name) != 15 || name[8] != 'T') return false;
+  const int year = fourDigits(name);
+  const int month = twoDigits(name + 4);
+  const int day = twoDigits(name + 6);
+  const int hour = twoDigits(name + 9);
+  const int minute = twoDigits(name + 11);
+  const int second = twoDigits(name + 13);
   if (year < 2024 || year > 2099 || month < 1 || month > 12 || day < 1 || day > 31 ||
       hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) return false;
   out = (time_t)(daysFromCivil(year, (unsigned)month, (unsigned)day) * 86400LL + hour * 3600 + minute * 60 + second);
@@ -73,15 +67,7 @@ void parseMeta(NoteSummary& n) {
   while (f.available()) {
     String line = f.readStringUntil('\n');
     line.trim();
-    if (line.startsWith("created_utc=")) {
-      String v = line.substring(strlen("created_utc="));
-      time_t epoch = 0;
-      if (v.length() == 20 && parseIsoUtcEpoch(v.c_str(), epoch)) {
-        strncpy(n.createdUtc, v.c_str(), sizeof(n.createdUtc) - 1);
-        n.createdEpoch = epoch;
-        n.hasTimestamp = true;
-      }
-    } else if (line.startsWith("duration_sec=")) {
+    if (line.startsWith("duration_sec=")) {
       n.durationSec = (uint32_t)line.substring(strlen("duration_sec=")).toInt();
     } else if (line.startsWith("duration=")) {
       n.durationSec = (uint32_t)line.substring(strlen("duration=")).toInt();
@@ -98,44 +84,65 @@ void begin() {
 
 bool available() {
   if (!sdcard::ensureMounted()) return false;
-  if (!sdcard::fs().exists("/notes")) sdcard::fs().mkdir("/notes");
+  if (!sdcard::fs().exists(kRoot)) sdcard::fs().mkdir(kRoot);
   return true;
 }
 
 void rescan() {
   notes.clear();
-  highestId = 0;
+  highestUnset = 0;
   if (!available()) return;
 
-  File dir = sdcard::fs().open("/notes");
-  if (!dir || !dir.isDirectory()) return;
+  File root = sdcard::fs().open(kRoot);
+  if (!root || !root.isDirectory()) {
+    if (root) root.close();
+    return;
+  }
 
-  for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
-    if (f.isDirectory()) {
-      f.close();
-      continue;
+  // Collect directory names first, then process them. Opening session.wav while
+  // the directory handle is still iterating is fragile on SD_MMC; gather, close,
+  // then read.
+  std::vector<String> dirs;
+  for (File e = root.openNextFile(); e; e = root.openNextFile()) {
+    if (e.isDirectory()) {
+      String path = e.path();
+      const char* base = strrchr(path.c_str(), '/');
+      dirs.emplace_back(base ? base + 1 : path.c_str());
     }
-    uint16_t id = 0;
-    String path = f.path();
-    const uint32_t size = (uint32_t)f.size();
-    f.close();
-    if (!parseId(path.c_str(), id)) continue;
-    if (id > highestId) highestId = id;
-    if (size <= 44) continue;
+    e.close();
+  }
+  root.close();
+
+  for (const String& name : dirs) {
+    unsigned u = 0;
+    if (sscanf(name.c_str(), "unset-%u", &u) == 1 && u > highestUnset) highestUnset = u;
 
     NoteSummary n;
-    n.id = id;
+    strncpy(n.dir, name.c_str(), sizeof(n.dir) - 1);
+    buildPaths(n.dir, n.wavPath, sizeof(n.wavPath), n.metaPath, sizeof(n.metaPath));
+
+    // A directory counts as a recording only once session.wav holds real audio.
+    // A partial/cancelled capture (no wav, or header-only) is ignored by the scan.
+    File w = sdcard::fs().open(n.wavPath, FILE_READ);
+    if (!w) continue;
+    const uint32_t size = (uint32_t)w.size();
+    w.close();
+    if (size <= 44) continue;
+
     n.byteSize = size;
-    makePaths(id, n.wavPath, sizeof(n.wavPath), n.metaPath, sizeof(n.metaPath));
+    time_t epoch = 0;
+    if (parseStampEpoch(n.dir, epoch)) {
+      n.createdEpoch = epoch;
+      n.hasTimestamp = true;
+    }
     parseMeta(n);
     notes.push_back(n);
   }
-  dir.close();
 
   std::sort(notes.begin(), notes.end(), [](const NoteSummary& a, const NoteSummary& b) {
     if (a.hasTimestamp != b.hasTimestamp) return a.hasTimestamp;
     if (a.hasTimestamp && b.hasTimestamp) return a.createdEpoch > b.createdEpoch;
-    return a.id > b.id;
+    return strcmp(a.dir, b.dir) > 0;
   });
 }
 
@@ -147,42 +154,58 @@ bool noteAt(size_t index, NoteSummary& out) {
   return true;
 }
 
-uint16_t nextNoteId() { return highestId + 1; }
+bool newNote(bool hasTime, time_t createdUtc,
+             char* dirOut, size_t dirLen,
+             char* wavOut, size_t wavLen,
+             char* metaOut, size_t metaLen) {
+  if (!available()) return false;
 
-bool pathsForId(uint16_t id, char* wavOut, size_t wavLen, char* metaOut, size_t metaLen) {
-  if (id == 0 || !available()) return false;
-  makePaths(id, wavOut, wavLen, metaOut, metaLen);
+  char dir[20];
+  if (hasTime) {
+    tm t;
+    gmtime_r(&createdUtc, &t);
+    snprintf(dir, sizeof(dir), "%04d%02d%02dT%02d%02d%02d",
+             t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
+  } else {
+    snprintf(dir, sizeof(dir), "unset-%03u", highestUnset + 1);
+    // Reserve this fallback index now so a second capture before the next rescan
+    // does not collide on the same name.
+    ++highestUnset;
+  }
+
+  char full[40];
+  snprintf(full, sizeof(full), "%s/%s", kRoot, dir);
+  if (!sdcard::fs().exists(full) && !sdcard::fs().mkdir(full)) return false;
+
+  if (dirOut && dirLen) {
+    strncpy(dirOut, dir, dirLen - 1);
+    dirOut[dirLen - 1] = 0;
+  }
+  buildPaths(dir, wavOut, wavLen, metaOut, metaLen);
   return true;
 }
 
-bool writeMetadata(uint16_t id, uint32_t durationSec, bool hasCreatedUtc, time_t createdUtc) {
-  if (!available() || id == 0) return false;
-  char meta[32];
-  makePaths(id, nullptr, 0, meta, sizeof(meta));
+bool writeMetadata(const char* dir, uint32_t durationSec) {
+  if (!available() || !dir || !dir[0]) return false;
+  char meta[48];
+  buildPaths(dir, nullptr, 0, meta, sizeof(meta));
   File f = sdcard::fs().open(meta, FILE_WRITE);
   if (!f) return false;
-  if (hasCreatedUtc) {
-    tm t;
-    gmtime_r(&createdUtc, &t);
-    char iso[21];
-    snprintf(iso, sizeof(iso), "%04d-%02d-%02dT%02d:%02d:%02dZ",
-             t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
-    f.print("created_utc=");
-    f.println(iso);
-  }
   f.print("duration_sec=");
   f.println(durationSec);
   f.close();
   return true;
 }
 
-bool deleteNote(uint16_t id) {
-  if (!available()) return false;
-  char wav[32], meta[32];
-  makePaths(id, wav, sizeof(wav), meta, sizeof(meta));
+bool deleteNote(const char* dir) {
+  if (!available() || !dir || !dir[0]) return false;
+  char wav[48], meta[48], full[40];
+  buildPaths(dir, wav, sizeof(wav), meta, sizeof(meta));
+  snprintf(full, sizeof(full), "%s/%s", kRoot, dir);
   bool ok = true;
   if (sdcard::fs().exists(wav)) ok = sdcard::fs().remove(wav) && ok;
   if (sdcard::fs().exists(meta)) ok = sdcard::fs().remove(meta) && ok;
+  if (sdcard::fs().exists(full)) ok = sdcard::fs().rmdir(full) && ok;
   rescan();
   return ok;
 }

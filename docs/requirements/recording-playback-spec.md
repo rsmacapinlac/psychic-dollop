@@ -33,7 +33,11 @@ reference: `../reference/audio-codec-es8311.md`.
   - `bitsPerSample = 16`
 - **Capture buffer:** 8 KB stereo read buffer, 4 KB mono write buffer
   (`REC_BUF = 8 * 1024`), allocated from heap.
-- **File naming:** `/notes/note_%03d.wav` (zero-padded, e.g. `note_001.wav`).
+- **File naming:** one directory per recording named with the UTC capture time,
+  `/recordings/<YYYYMMDDTHHMMSS>/session.wav` (e.g.
+  `/recordings/20260618T091500/session.wav`); duration is stored beside it in
+  `session.meta`. See ADR 0004 for the full layout (and the `unset-NNN` fallback
+  when the clock is not yet set).
 - **Validity floor:** a recording shorter than ~1000 bytes is discarded.
 
 ## Playback

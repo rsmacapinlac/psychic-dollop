@@ -44,7 +44,7 @@ scribr/
       config_store.h/.cpp       # /scribr.cfg parse/write/mark-applied
       clock.h/.cpp              # UTC system/RTC sync + local offset conversion
       battery.h/.cpp            # percent curve + low-battery hysteresis
-      storage.h/.cpp            # /notes scan, metadata, note IDs, delete, free-space
+      storage.h/.cpp            # /recordings scan, metadata, timestamp dirs, delete, free-space
       wav_recorder.h/.cpp       # WAV header/backfill, temp/commit/cancel policy
       wav_player.h/.cpp         # WAV validation/playback stop flag
       audio_service.h/.cpp      # app-facing begin/recordTo/play/stop seam
@@ -92,7 +92,7 @@ Risk-first order, with compileable checkpoints:
 6. **Battery + advisory plumbing**
    - GPIO4 ADC averaging, ×2 divider, reference percent curve, 15/20% hysteresis, 30 s interval.
 7. **Storage + metadata**
-   - Create `/notes` if needed, scan notes, derive next index, sort newest first, delete wav+meta.
+   - Create `/recordings` if needed, scan timestamp-named recording dirs, sort newest first, delete dir+contents.
    - Define deterministic corrupt/orphan recovery behavior.
 8. **Audio bring-up in isolation**
    - ES8311 init, audio rail/PA control, I2S standard mode, capture/playback test sketches or guarded firmware modes.
@@ -180,7 +180,7 @@ Implementation should add a results column or separate validation log once hardw
 3. **Buttons**
    - Log short/long/double events with timestamps; verify thresholds on both buttons.
 4. **SD_MMC**
-   - Mount/unmount tests, `/scribr.cfg` read, `/notes` create/scan, free-space reporting.
+   - Mount/unmount tests, `/scribr.cfg` read, `/recordings` create/scan, free-space reporting.
 5. **RTC/I2C**
    - I2C scan for 0x51 and 0x18; read RTC registers; test OS-bit invalid path; test set/readback.
 6. **Battery ADC**
@@ -300,3 +300,47 @@ Completed and compile-checked an initial real audio implementation behind `servi
 Validation: `arduino-cli compile --profile esp32s3 scribr` passes.
 
 Important: this is the first hardware-facing ES8311/I²S implementation and is not yet hardware-validated. The ES8311 register sequence is intentionally isolated in `scribr/src/services/audio_service.cpp` and should be tuned during bring-up if capture/playback is silent, noisy, inverted, or clock-unstable.
+
+### 2026-06-18 checkpoint 5
+
+Reworked the SD storage layout to mirror the earshot project's filesystem-as-state
+model (ADR 0004 amended):
+
+- changed the on-disk layout from flat `/notes/note_%03d.wav` + `.meta` to one
+  directory per recording, `/recordings/<YYYYMMDDTHHMMSS>/session.wav` +
+  `session.meta`, named with the UTC capture time;
+- made the directory name the authoritative creation timestamp (parsed back on
+  scan); `session.meta` now carries only `duration_sec=`;
+- added an `unset-NNN` fallback directory name for captures made before the clock
+  is set (sorted last, displayed "time not set");
+- reworked `services::storage` API: `newNote()` creates the timestamped dir and
+  returns its paths; `writeMetadata(dir, duration)` and `deleteNote(dir)` are now
+  keyed by directory name; the scan ignores any directory without a valid
+  `session.wav` (self-healing) and removes a discarded/aborted capture's directory;
+- changed the recording identity in the UI model from a `uint16_t` id to the
+  directory name; record-start, stop/discard, and cancel paths now create and clean
+  up the directory accordingly;
+- changed `sd_card` to create `/recordings` instead of `/notes`;
+- updated ADR 0004/0007, the recording-playback and time-power specs, and the
+  storage acceptance criteria to match.
+
+Validation: `arduino-cli compile -m esp32s3 scribr` passes (flash 17%, RAM 8%).
+Not yet hardware-validated.
+
+### 2026-06-18 checkpoint 6
+
+Added a serial time-set path so the clock can be set without the SD-card
+`rtc_set_utc` dance (no snapshot drift, no timing window):
+
+- `services::clock::setFromEpoch(epoch)` — validates and writes the PCF85063 +
+  system clock, updating status to `timeSet`;
+- `services::clock::pollSerialTimeSet()` — non-blocking line reader accepting
+  `TIME <unix-epoch>` or `TIME <ISO-8601 UTC>` over USB CDC; returns true on the
+  tick it sets the clock;
+- `app::tick()` polls it each loop and clears the TIME NOT SET condition + redraws
+  on success (works any time, not just at boot);
+- added host helper `tools/set-time.sh [PORT] [EPOCH]` (defaults `/dev/ttyACM0`,
+  now) and documented the path in `requirements/boot-configuration.md`.
+
+Validation: `arduino-cli compile -m esp32s3 scribr` passes (flash 17%, RAM 8%).
+Not yet hardware-validated.

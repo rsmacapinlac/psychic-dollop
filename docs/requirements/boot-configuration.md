@@ -73,6 +73,26 @@ settings screen.
   follow the TIME NOT SET behaviour: recording is allowed, bogus timestamps are
   not written, and the TIME NOT SET condition screen is surfaced.
 
+## Serial time-set (developer / desk path)
+
+In addition to the `rtc_set_utc` file bootstrap, the firmware accepts the current
+UTC time over its USB CDC serial port at runtime. This avoids the SD-card edit and
+the snapshot-drift/timing-window problems of the file (the host sends the *actual*
+"now"), and works without removing the card.
+
+- The firmware polls serial each tick (`clock::pollSerialTimeSet`) and accepts a
+  line of the form `TIME <unix-epoch>` or `TIME <YYYY-MM-DDTHH:MM:SSZ>` (UTC).
+- On a valid value it writes the PCF85063 + system clock, logs
+  `RTC set from serial; epoch=… UTC`, and clears the TIME NOT SET screen.
+- The same range/sanity checks apply (`2024–2099`, epoch `>= 1700000000`); bad
+  input is rejected and logged, never written as a bogus time.
+- Host helper: `tools/set-time.sh [PORT] [EPOCH]` (defaults `/dev/ttyACM0`, now).
+
+This is a convenience input path, not an ongoing time source. The persistent,
+user-facing mechanism remains `/scribr.cfg`; the eventual hands-off source is the
+BLE companion app (ADR 0007). If the RTC has no backup power, the clock must be
+re-set on each cold boot regardless of method.
+
 ## Future companion-app interaction
 
 The future BLE companion app should treat `/scribr.cfg` as the device's stable
